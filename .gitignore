@@ -22,3 +22,5 @@ TownfallUltraWide.ini
 __pycache__/
 *.pyc
 tools/dump_log.txt
+Townfall43.log
+Townfall43.ini

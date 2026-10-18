@@ -1,133 +1,186 @@
-// hooks.cpp - camera hooks that replace the former 32:9 byte patch.
+// hooks.cpp - Camera hook for native 4:3 (and other narrow) displays.
 //
-// FMinimalViewInfo::CalculateProjectionMatrixGivenView @ 0x1798088
-//     rcx = FMinimalViewInfo, dl = EAspectRatioAxisConstraint,
-//     r8 = FViewport, r9 = FSceneViewInitOptions& (ProjectionMatrix @ +0xA0,
-//     ViewRectangle @ +0x120)
+// FMinimalViewInfo::CalculateProjectionMatrixGivenView (RVA 0x13EEC44 in the
+// 2026-10-08 Steam build, located by pattern scan):
+//     rcx = const FMinimalViewInfo&, dl = EAspectRatioAxisConstraint,
+//     r8  = FViewport*, r9 = FSceneViewProjectionData&
+// It computes ViewExtents = Viewport->CalculateViewExtents(AspectRatio,
+// ViewRect) and calls CalculateProjectionMatrixGivenViewRectangle, which
+// writes ProjectionMatrix and (for bConstrainAspectRatio cameras) the
+// ConstrainedViewRect - the letterboxed area the scene is rendered into.
 //
-// FViewport::CalculateViewExtents (inner rect adjustment) @ 0x1798174
-//     rcx = FIntRect& out, r9 = FIntRect& in; returns the out rect. Vanilla
-//     behavior: pillarbox/letterbox the rect to the camera's authored aspect.
+// Layout (from the shipped PDB):
+//   FMinimalViewInfo (0x8C0): +0x30 FOV, +0x5C AspectRatio,
+//                             +0x68 bit0 bConstrainAspectRatio
+//   FSceneViewProjectionData: +0xA0 ProjectionMatrix (double[4][4]),
+//                             +0x120 ViewRect, +0x148 ConstrainedViewRect
 //
-// Two coordinated decisions are made per view:
+// Cameras are classified like the original ultrawide mod: constraint 1
+// (MaintainXFOV) with an authored AspectRatio is a cutscene camera, anything
+// else is a gameplay camera.
 //
-//  - CalculateViewExtents: for normal cameras the view rect is handed through
-//    unchanged (the former jbe->jmp byte patch, now conditional). For
-//    cutscene cameras with [Camera] DisableInCutscenes=1 the original engine
-//    function runs, reproducing the vanilla pillarbox exactly.
-//
-//  - CalculateProjectionMatrixGivenView: for normal cameras the
-//    bConstrainAspectRatio flag (bit 0 of the FMinimalViewInfo flag dword at
-//    +0x68) is cleared so the matrix is built from the real view rect aspect
-//    (M00 = M11 / rectAspect) instead of the authored AspectRatio property
-//    (which would stretch the authored-aspect image across the full 32:9
-//    viewport). Cutscene cameras use constraint 1 (MaintainXFOV): the FOV
-//    property is the horizontal FOV and the vertical FOV is derived from the
-//    real view rect, vHalf = atan(tan(FOV/2) / rectAspect) - at the full 32:9
-//    rect that crops the vertical FOV (zoomed-in image). They are switched to
-//    constraint 0 (only when an authored AspectRatio property at +0x5c
-//    exists), which yields the rect-independent authored vertical FOV
-//    2*atan(tan(FOV/2) / aspectProp) so the picture only widens horizontally.
-//    With DisableInCutscenes=1 cutscene cameras are left 100% vanilla instead.
+//  - Gameplay cameras with bConstrainAspectRatio set (letterboxed) are run
+//    on a private copy with the flag cleared, so gameplay fills the screen.
+//  - On displays narrower than 16:9 (KeepWidescreenWidth=1), the gameplay
+//    projection is zoomed out uniformly so the horizontal FOV equals what the
+//    engine builds for a 16:9 rect of the same height: the full 16:9 width,
+//    plus extra view above and below (Vert+). First-person primitives
+//    (FFirstPersonParameters::FOVCorrectionFactor is relative to the main
+//    projection) zoom out with the world.
+//  - Cutscenes are left alone by default (the game letterboxes them to the
+//    authored ~2.35:1). With [Camera] Cutscenes=1 the letterboxed frame is
+//    expanded to the full screen height, keeping the authored vertical FOV
+//    and cropping the sides.
 
 #include <windows.h>
 
 #include <cstdint>
+#include <cstring>
 
+#include "config.h"
 #include "detour.h"
 #include "log.h"
 
 namespace {
 
-using CalcProj_t = void (*)(void* fmi, unsigned char constraint, void* viewport,
-                            unsigned char* viewInit);
+constexpr size_t kViewInfoSize = 0x8C0;
+constexpr size_t kFovOff = 0x30;
+constexpr size_t kAspectRatioOff = 0x5C;
+constexpr size_t kFlagsOff = 0x68;
+constexpr size_t kProjMatrixOff = 0xA0;
+constexpr size_t kViewRectOff = 0x120;
+constexpr size_t kConstrainedRectOff = 0x148;
+constexpr size_t kProjDataSize = 0x160;  // sizeof(FSceneViewProjectionData)
+
+struct IntRect {
+    int minX, minY, maxX, maxY;
+};
+
+using CalcProj_t = void (*)(const void* fmi, unsigned char constraint, void* viewport,
+                            unsigned char* projData);
 CalcProj_t g_origCalcProj = nullptr;
 
-using CalcViewExtents_t = void* (*)(void* outRect, void* a, void* b, void* inRect);
-CalcViewExtents_t g_origCalcViewExtents = nullptr;
+bool gUnletterboxGameplay = true;
+bool gFillCutscenes = false;
+bool gKeepWidth = true;
+const double gKeepWidthAspect = 16.0 / 9.0;
 
-// Set at CalculateProjectionMatrixGivenView entry, consumed by the
-// CalculateViewExtents hook later in the same view setup (same thread).
-bool gKeepViewRect = false;
+bool gLoggedKeepWidth = false;
+bool gLoggedGameplay = false;
+bool gLoggedCutscene = false;
 
-// [Camera] DisableInCutscenes (0/1, default 0): leave cutscenes 100% vanilla
-// (pillarboxed to the camera's authored aspect) instead of super ultrawide.
-bool CutscenePillarboxEnabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = 0;
-        wchar_t path[MAX_PATH];
-        HMODULE self;
-        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               (LPCWSTR)&CutscenePillarboxEnabled, &self)) {
-            GetModuleFileNameW(self, path, MAX_PATH);
-            wchar_t* slash = wcsrchr(path, L'\\');
-            if (slash) {
-                wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"TownfallUltraWide.ini");
-                cached = GetPrivateProfileIntW(L"Camera", L"DisableInCutscenes", 0, path) != 0;
-            }
-        }
-    }
-    return cached != 0;
+// One line per camera kind with the vanilla parameters and the final rect,
+// so the log shows what the game does on this display.
+void LogFirst(bool& flag, const char* what, const void* fmi, unsigned char constraint,
+              unsigned char* projData, const char* action) {
+    if (flag) return;
+    flag = true;
+    const char* v = static_cast<const char*>(fmi);
+    const IntRect full = *reinterpret_cast<const IntRect*>(projData + kViewRectOff);
+    const IntRect out = *reinterpret_cast<const IntRect*>(projData + kConstrainedRectOff);
+    LogLine("camera: first %s view %dx%d constraint=%d bConstrain=%d aspect=%.4f fov=%.2f"
+            " -> rect (%d,%d)-(%d,%d) [%s]",
+            what, full.maxX - full.minX, full.maxY - full.minY, constraint,
+            (*reinterpret_cast<const unsigned*>(v + kFlagsOff) & 1u) ? 1 : 0,
+            static_cast<double>(*reinterpret_cast<const float*>(v + kAspectRatioOff)),
+            static_cast<double>(*reinterpret_cast<const float*>(v + kFovOff)), out.minX, out.minY,
+            out.maxX, out.maxY, action);
 }
 
-void HookCalcProj(void* fmi, unsigned char constraint, void* viewport, unsigned char* viewInit) {
-    gKeepViewRect = false;
+void HookCalcProj(const void* fmi, unsigned char constraint, void* viewport,
+                  unsigned char* projData) {
+    const char* v = static_cast<const char*>(fmi);
+    const float authoredAspect = *reinterpret_cast<const float*>(v + kAspectRatioOff);
+    const bool cutscene = constraint == 1 && authoredAspect > 0.f;
+    const bool constrained = (*reinterpret_cast<const unsigned*>(v + kFlagsOff) & 1u) != 0;
 
-    if (constraint == 1) {
-        // Cutscene camera (MaintainXFOV).
-        const float aspect = *reinterpret_cast<float*>(static_cast<char*>(fmi) + 0x5c);
-        if (aspect > 0.f) {
-            if (CutscenePillarboxEnabled()) {
-                // Vanilla cutscene: keep bConstrainAspectRatio, keep the
-                // constraint, and let the engine adjust the view rect.
-                gKeepViewRect = true;
-                g_origCalcProj(fmi, constraint, viewport, viewInit);
-                return;
-            }
-            // Ultrawide cutscene: switch to constraint 0 so the authored
-            // vertical FOV is preserved and the picture only widens
-            // horizontally (same framing behavior as gameplay).
-            constraint = 0;
+    if (!cutscene) {
+        alignas(64) unsigned char copy[kViewInfoSize];
+        const void* info = fmi;
+        if (gUnletterboxGameplay && constrained) {
+            memcpy(copy, fmi, sizeof(copy));
+            *reinterpret_cast<unsigned*>(copy + kFlagsOff) &= ~1u;
+            info = copy;
         }
+        // Untouched input, for the 16:9 reference pass below.
+        alignas(16) unsigned char ref[kProjDataSize];
+        memcpy(ref, projData, sizeof(ref));
+
+        g_origCalcProj(info, constraint, viewport, projData);
+
+        const IntRect full = *reinterpret_cast<const IntRect*>(projData + kViewRectOff);
+        const int fw = full.maxX - full.minX;
+        const int fh = full.maxY - full.minY;
+        double* m = reinterpret_cast<double*>(projData + kProjMatrixOff);  // row-major M[r][c]
+        if (gKeepWidth && fw > 0 && fh > 0 && m[0] != 0.0 &&
+            static_cast<double>(fw) / fh < gKeepWidthAspect - 1e-3) {
+            // Let the engine build the projection for a 16:9 rect of the
+            // same height; its M00 is the 16:9 horizontal FOV. Zoom the real
+            // projection out uniformly (X and Y columns) until M00 matches:
+            // same width as 16:9, extra view above and below.
+            IntRect& refRect = *reinterpret_cast<IntRect*>(ref + kViewRectOff);
+            refRect.maxX = refRect.minX + static_cast<int>(fh * gKeepWidthAspect + 0.5);
+            *reinterpret_cast<IntRect*>(ref + kConstrainedRectOff) = refRect;
+            g_origCalcProj(info, constraint, viewport, ref);
+            const double ref00 = reinterpret_cast<const double*>(ref + kProjMatrixOff)[0];
+            const double k = ref00 / m[0];
+            if (k > 0.0 && k < 1.0) {
+                for (int r = 0; r < 4; ++r) {
+                    m[r * 4 + 0] *= k;
+                    m[r * 4 + 1] *= k;
+                }
+            }
+            if (!gLoggedKeepWidth) {
+                gLoggedKeepWidth = true;
+                LogLine("camera: keep 16:9 width at %dx%d, zoom factor %.4f%s", fw, fh, k,
+                        (k > 0.0 && k < 1.0) ? "" : " (not applied)");
+            }
+        }
+        LogFirst(gLoggedGameplay, "gameplay", fmi, constraint, projData,
+                 info != fmi ? "letterbox removed" : "vanilla");
+        return;
     }
 
-    // Normal camera: build the projection from the real view rect aspect.
-    unsigned* flags = reinterpret_cast<unsigned*>(static_cast<char*>(fmi) + 0x68);
-    *flags &= ~1u;
-    g_origCalcProj(fmi, constraint, viewport, viewInit);
-}
-
-void* HookCalcViewExtents(void* outRect, void* a, void* b, void* inRect) {
-    if (!gKeepViewRect) {
-        // Patch active: present the incoming rect unchanged (the former
-        // jbe->jmp byte patch), skipping the engine's pillarbox adjustment.
-        reinterpret_cast<long long*>(outRect)[0] = reinterpret_cast<long long*>(inRect)[0];
-        reinterpret_cast<long long*>(outRect)[1] = reinterpret_cast<long long*>(inRect)[1];
-        return outRect;
+    g_origCalcProj(fmi, constraint, viewport, projData);
+    if (!gFillCutscenes) {
+        LogFirst(gLoggedCutscene, "cutscene", fmi, constraint, projData, "vanilla");
+        return;
     }
-    // Cutscene with DisableInCutscenes=1: vanilla pillarbox adjustment.
-    return g_origCalcViewExtents(outRect, a, b, inRect);
+
+    // Fill: render into the full view rect, keep M11 (the authored vertical
+    // FOV of the letterboxed frame) and set M00 = M11 / screenAspect by
+    // scaling the whole X column, which keeps any off-center terms consistent.
+    const IntRect full = *reinterpret_cast<const IntRect*>(projData + kViewRectOff);
+    IntRect& out = *reinterpret_cast<IntRect*>(projData + kConstrainedRectOff);
+    double* m = reinterpret_cast<double*>(projData + kProjMatrixOff);  // row-major M[r][c]
+    const int fw = full.maxX - full.minX;
+    const int fh = full.maxY - full.minY;
+    if (fw <= 0 || fh <= 0 || m[0] == 0.0) return;
+    const double k = (m[5] * fh / fw) / m[0];
+    m[0] *= k;
+    m[4] *= k;
+    m[8] *= k;
+    m[12] *= k;
+    out = full;
+    LogFirst(gLoggedCutscene, "cutscene", fmi, constraint, projData, "filled");
 }
 
 }  // namespace
 
-void InstallCameraHooks(HMODULE game) {
+bool InstallCameraHooks(HMODULE game) {
+    gUnletterboxGameplay = ConfigInt(L"Camera", L"NoGameplayLetterbox", 1) != 0;
+    gFillCutscenes = ConfigInt(L"Camera", L"FillCutscenes", 0) != 0;
+    gKeepWidth = ConfigInt(L"Camera", L"KeepWidescreenWidth", 1) != 0;
+    LogLine("camera: KeepWidescreenWidth=%d NoGameplayLetterbox=%d FillCutscenes=%d",
+            gKeepWidth ? 1 : 0, gUnletterboxGameplay ? 1 : 0, gFillCutscenes ? 1 : 0);
+
+    // mov [rsp+8],rbx; mov [rsp+10h],rsi; push rdi; sub rsp,30h (15 bytes,
+    // rsp-relative, trampoline-safe), then the AsymmetricCropFraction reads.
     static const unsigned char kSigCalcProj[] = {
         0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30,
         0xF3, 0x0F, 0x10, 0x91, 0x74, 0x08, 0x00, 0x00, 0x49, 0x8B, 0xF9, 0xF3, 0x0F, 0x58, 0x91,
         0x70, 0x08, 0x00, 0x00};
-    InstallHook(game, "CalcProj", kSigCalcProj, sizeof(kSigCalcProj), 15,
-                reinterpret_cast<void*>(&HookCalcProj),
-                reinterpret_cast<void**>(&g_origCalcProj));
-
-    // CalculateViewExtents inner rect adjustment. 21-byte branch-free,
-    // rsp-safe prologue (copied verbatim into the trampoline).
-    static const unsigned char kSigCalcViewExtents[] = {
-        0x49, 0x8B, 0x01, 0x4C, 0x8B, 0xC1, 0x45, 0x8B, 0x51, 0x04, 0x48, 0x89, 0x01,
-        0x49, 0x8B, 0x41, 0x08, 0x48, 0x89, 0x41, 0x08};
-    InstallHook(game, "CalcViewExtents", kSigCalcViewExtents, sizeof(kSigCalcViewExtents), 21,
-                reinterpret_cast<void*>(&HookCalcViewExtents),
-                reinterpret_cast<void**>(&g_origCalcViewExtents));
+    return InstallHook(game, "CalcProj", kSigCalcProj, sizeof(kSigCalcProj), 15,
+                       reinterpret_cast<void*>(&HookCalcProj),
+                       reinterpret_cast<void**>(&g_origCalcProj));
 }

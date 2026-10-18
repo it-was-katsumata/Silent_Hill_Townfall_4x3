@@ -1,86 +1,69 @@
-// dllmain.cpp - Townfall Super Ultrawide (32:9) gameplay fix
+// dllmain.cpp - Townfall 4:3 mod (fork of Infinest's Townfall Super Ultrawide)
 //
-// The game renders gameplay views through FViewport::CalculateViewExtents
-// (RVA 0x1798174 in Townfall-Win64-Shipping.exe, UE 5.6.1), which letterboxes /
-// pillarboxes the view rect when the camera's aspect-ratio constraint binds
-// (bConstrainAspectRatio, e.g. the 21:9 gameplay clamp).
+// Fixes for playing SILENT HILL: Townfall on a display that is already 4:3
+// (e.g. 2048x1536): gameplay keeps the full 16:9 horizontal view and gains
+// view above and below (the game alone crops the sides instead), gameplay is
+// never letterboxed, and cutscenes can optionally fill the screen.
 //
 // This DLL is dropped into Townfall\Binaries\Win64 as a proxy for a system
-// DLL the game imports statically (dxgi.dll by default; build.bat accepts
-// another target, e.g. build.bat winmm) and installs two hooks (hooks.cpp):
-// the view rect is handed through unchanged for normal cameras (full 32:9
-// viewport), and the
-// projection matrix is built from the real view rect aspect instead of the
-// camera's authored aspect property (which would stretch the image).
+// DLL the game imports statically (winmm.dll by default, so it can coexist
+// with OptiScaler/ReShade as dxgi.dll; build.bat accepts another target) and
+// installs one camera hook (hooks.cpp).
 //
-// All hook sites are located at runtime by pattern scanning, so game updates
-// that move code will not corrupt anything - the hooks simply refuse to
+// The hook site is located at runtime by pattern scanning, so a game update
+// that moves code will not corrupt anything - the hook simply refuses to
 // install and the game runs unmodified.
 //
-// Configuration (TownfallUltraWide.ini, next to this DLL):
-//   [Camera] Enabled             0/1 - master switch for the 32:9 gameplay fix
-//   [Camera] DisableInCutscenes  0/1 - leave cutscenes vanilla (pillarboxed)
-//   [UI]     Constrain           0/1/2 - off / 16:9 HUD box / 21:9 HUD box
-//                                      (gameplay only)
+// Configuration (Townfall43.ini, next to this DLL):
+//   [Camera] Enabled              0/1 - master switch
+//   [Camera] KeepWidescreenWidth  0/1 - 16:9 width + extra height (Vert+)
+//   [Camera] NoGameplayLetterbox  0/1 - remove letterboxing from gameplay
+//   [Camera] FillCutscenes        0/1 - cutscenes fill the screen (sides cropped)
+//   [Log]    Enabled              0/1 - write Townfall43.log
 // The ini is generated with defaults on first launch if it does not exist.
 
 #include <windows.h>
 
-#include <cstring>
-
+#include "config.h"
 #include "log.h"
 #include "proxy.h"
 
-
-void InstallCameraHooks(HMODULE game);
-void InstallUIConstraint(HMODULE game);
-
-static void IniPath(wchar_t* path) {
-    HMODULE self;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (LPCWSTR)&IniPath, &self)) {
-        path[0] = L'\0';
-        return;
-    }
-    GetModuleFileNameW(self, path, MAX_PATH);
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (slash) wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"TownfallUltraWide.ini");
-}
+bool InstallCameraHooks(HMODULE game);
 
 // Write a default ini with explanations if the user has none yet.
 static void EnsureDefaultIni() {
     wchar_t path[MAX_PATH];
-    IniPath(path);
-    if (!path[0] || GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) return;
+    if (!ModFilePath(path, MOD_INI_NAME) || GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+        return;
 
     static const char kDefaultIni[] =
-        "; Townfall UltraWide mod - configuration\r\n"
+        "; Townfall 4:3 mod - configuration\r\n"
         "; Generated automatically. Delete this file to reset to defaults.\r\n"
+        "; Changes take effect the next time the game starts.\r\n"
         "\r\n"
         "[Camera]\r\n"
-        "; 0 - off, 1 - on\r\n"
-        "; Unlocks super ultrawide (32:9) gameplay by removing the 21:9 aspect\r\n"
-        "; cap and pillarboxing. Vertical FOV stays as authored for 16:9, so\r\n"
-        "; the image is never stretched.\r\n"
+        "; 0 - the mod does nothing (no hooks installed), 1 - on\r\n"
         "Enabled=1\r\n"
         "\r\n"
         "; 0 - off, 1 - on\r\n"
-        "; Renders cutscenes like the unpatched game (pillarboxed to the\r\n"
-        "; camera's authored aspect) instead of full super ultrawide width.\r\n"
-        "DisableInCutscenes=0\r\n"
+        "; Keeps the full 16:9 left-to-right view on a 4:3 (or any narrower)\r\n"
+        "; display and adds the extra screen height as view above and below.\r\n"
+        "; 0 shows what the game does by default: 16:9 height, sides cut off.\r\n"
+        "KeepWidescreenWidth=1\r\n"
         "\r\n"
-        "[UI]\r\n"
-        "; Constrain: 0 - off, the HUD spans the full screen width\r\n"
-        ";            1 - constrain the in-game HUD to a centered 16:9 box\r\n"
-        ";            2 - constrain the in-game HUD to a centered 21:9 box\r\n"
-        "; Applies only during gameplay. Main menu, inventory and pause\r\n"
-        "; screens always use the full screen width.\r\n"
-        "Constrain=0\r\n"
+        "; 0 - off, 1 - on\r\n"
+        "; Removes letterboxing (black bars) from normal gameplay, e.g. from\r\n"
+        "; the in-game Letterbox option, so gameplay always fills the screen.\r\n"
+        "NoGameplayLetterbox=1\r\n"
+        "\r\n"
+        "; 0 - off, 1 - on\r\n"
+        "; Cutscenes fill the whole screen instead of the game's ~2.35:1\r\n"
+        "; letterbox. Keeps the cinematic vertical framing, crops the sides.\r\n"
+        "FillCutscenes=0\r\n"
         "\r\n"
         "[Log]\r\n"
         "; 0 - off, 1 - on\r\n"
-        "; Writes TownfallUltraWide.log next to the DLL. Only useful for\r\n"
+        "; Writes Townfall43.log next to the DLL. Only useful for\r\n"
         "; troubleshooting; keep off during normal play.\r\n"
         "Enabled=0\r\n";
 
@@ -90,14 +73,7 @@ static void EnsureDefaultIni() {
     DWORD written = 0;
     WriteFile(f, kDefaultIni, sizeof(kDefaultIni) - 1, &written, nullptr);
     CloseHandle(f);
-    LogLine("default TownfallUltraWide.ini created");
-}
-
-static bool CameraEnabled() {
-    wchar_t path[MAX_PATH];
-    IniPath(path);
-    if (!path[0]) return true;
-    return GetPrivateProfileIntW(L"Camera", L"Enabled", 1, path) != 0;
+    LogLine("default Townfall43.ini created");
 }
 
 static DWORD WINAPI InitThread(LPVOID) {
@@ -106,21 +82,14 @@ static DWORD WINAPI InitThread(LPVOID) {
         LogLine("ERROR: game module not found");
         return 1;
     }
-
-    // UI constraint (step 2): hooked before the patches so the full chain is
-    // captured early.
-    InstallUIConstraint(game);
-
-    if (!CameraEnabled()) {
-        LogLine("camera fix disabled via TownfallUltraWide.ini");
+    if (ConfigInt(L"Camera", L"Enabled", 1) == 0) {
+        LogLine("mod disabled via Townfall43.ini");
         return 0;
     }
-
-    // The camera hooks replace the former byte patch: they keep the view rect
-    // full-width for normal cameras and leave cutscenes vanilla when
-    // [Camera] DisableInCutscenes=1.
-    InstallCameraHooks(game);
-    LogLine("OK: 32:9 camera hooks installed");
+    if (InstallCameraHooks(game))
+        LogLine("OK: camera hook installed");
+    else
+        LogLine("ERROR: camera hook not installed (game build not recognised)");
     return 0;
 }
 

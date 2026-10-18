@@ -9,6 +9,8 @@
 
 #include <windows.h>
 
+#include "config.h"
+
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -24,16 +26,9 @@ void EnsureInit() {
     if (InterlockedCompareExchange(&gCsInit, 1, 0) == 0) {
         InitializeCriticalSection(&gCs);
         wchar_t path[MAX_PATH];
-        HMODULE self = nullptr;
-        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               (LPCWSTR)&EnsureInit, &self)) {
-            GetModuleFileNameW(self, path, MAX_PATH);
-            wchar_t* slash = wcsrchr(path, L'\\');
-            if (slash)
-                wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"TownfallUltraWide.log");
-        } else {
-            wcscpy_s(path, L"C:\\TownfallUltraWide.log");
+        if (!ModFilePath(path, MOD_LOG_NAME)) {
+            gCsInit = 2;  // no usable path: logging stays a no-op
+            return;
         }
         gFile = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -177,20 +172,7 @@ void LogLine(const char* fmt, ...) {
     LONG s = logState;
     if (s == 0) {
         if (InterlockedCompareExchange(&logState, 1, 0) == 0) {
-            int v = 0;
-            wchar_t path[MAX_PATH];
-            HMODULE self = nullptr;
-            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                   (LPCWSTR)&LogLine, &self)) {
-                GetModuleFileNameW(self, path, MAX_PATH);
-                wchar_t* slash = wcsrchr(path, L'\\');
-                if (slash) {
-                    wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"TownfallUltraWide.ini");
-                    v = GetPrivateProfileIntW(L"Log", L"Enabled", 0, path);
-                }
-            }
-            logState = v ? 2 : 1;
+            logState = ConfigInt(L"Log", L"Enabled", 0) ? 2 : 1;
         } else {
             while (logState == 0) Sleep(0);
         }
