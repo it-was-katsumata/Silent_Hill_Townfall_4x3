@@ -1,4 +1,5 @@
 @echo off
+rem Townfall 4:3 fork, by it-was-katsumata (2026). GPL-3.0, see LICENSE.
 rem Builds tools\pdbtool.exe. VS_ROOT defaults to the VS 2022 Build Tools install.
 if "%VS_ROOT%"=="" set VS_ROOT=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
 call "%VS_ROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1

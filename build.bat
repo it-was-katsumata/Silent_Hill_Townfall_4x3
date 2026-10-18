@@ -1,5 +1,7 @@
 @echo off
 setlocal
+rem By Infinest (Townfall Super Ultrawide). Modified 2026-10-17 by
+rem it-was-katsumata: winmm default target, VS_ROOT, config.cpp. GPL-3.0.
 rem VS_ROOT defaults to the VS 2022 Build Tools install.
 if "%VS_ROOT%"=="" set VS_ROOT=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
 call "%VS_ROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1

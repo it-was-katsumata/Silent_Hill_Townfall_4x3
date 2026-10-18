@@ -1,5 +1,9 @@
 // hooks.cpp - Camera hook for native 4:3 (and other narrow) displays.
 //
+// Originally part of Townfall Super Ultrawide by Infinest. Rewritten
+// 2026-10-17 by it-was-katsumata for the Townfall 4:3 fork. GPL-3.0, see
+// LICENSE.
+//
 // FMinimalViewInfo::CalculateProjectionMatrixGivenView (RVA 0x13EEC44 in the
 // 2026-10-08 Steam build, located by pattern scan):
 //     rcx = const FMinimalViewInfo&, dl = EAspectRatioAxisConstraint,

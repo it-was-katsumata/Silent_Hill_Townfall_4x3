@@ -1,5 +1,9 @@
 // log.cpp - Append-only diagnostic log next to the DLL.
 //
+// By Infinest (Townfall Super Ultrawide). Modified 2026-10-17 by
+// it-was-katsumata: log/config file names moved to config.h. GPL-3.0, see
+// LICENSE.
+//
 // Implemented entirely on raw Win32 handles with hand-rolled formatting:
 // no CRT stdio (fopen/fprintf) is used anywhere, because this logger is
 // called from the game's render thread and CRT stdio locks can deadlock

@@ -4,11 +4,11 @@ Fixes for playing *Silent Hill: Townfall* (Steam, UE 5.6.1) on a display that
 is already 4:3, such as 2048x1536 or 1920x1440. It does not force 4:3 onto a
 wide screen.
 
-Fork of [Infinest/Silent_Hill_Townfall_Ultrawide](https://github.com/Infinest/Silent_Hill_Townfall_Ultrawide)
-(super-ultrawide support). The proxy loader, logger, detour helper and
-reverse-engineering notes come from that project; the camera hook was
-rewritten for narrow displays, and the HUD constraint was removed (it has
-nothing to do on a native 4:3 screen).
+This is a modified fork of **[Townfall Super Ultrawide](https://github.com/Infinest/Silent_Hill_Townfall_Ultrawide)
+by [Infinest](https://github.com/Infinest)** ([Nexus Mods](https://www.nexusmods.com/silenthilltownfall/mods/29)).
+The proxy DLL design, export-stub generator, logger, detour and pattern-scan
+helpers and the original reverse engineering of the game's camera code are
+Infinest's work. See [Credits](#credits) and [License](#license) below.
 
 ## What it does
 
@@ -104,6 +104,48 @@ build.bat dsound     -> dist\dsound.dll
 - The remaining tools are from upstream and have the author's paths
   hard-coded.
 
+## Credits
+
+- **[Infinest](https://github.com/Infinest)**, author of the original
+  [Townfall Super Ultrawide](https://github.com/Infinest/Silent_Hill_Townfall_Ultrawide)
+  mod this fork is based on: the system-DLL proxy (`src/proxy.cpp`,
+  `src/proxy.h`, `tools/gen_proxy.py`), the logger (`src/log.cpp`), the detour
+  and pattern-scan helpers (`src/detour.cpp`, `src/detour.h`), the identification
+  of the camera projection function this mod hooks, and the reversing and test
+  tools in `tools/` that are not listed below. The full upstream commit history
+  is preserved in this repository.
+- **[it-was-katsumata](https://github.com/it-was-katsumata)**, this fork: the
+  native 4:3 camera hook (`src/hooks.cpp`), config handling (`src/config.*`),
+  `tools/pdbtool.cpp` (based on upstream's `tools/dia_layout.cpp`) and
+  `tools/pescan.py`.
+
+## Modifications
+
+As required by section 5 of the GPL-3.0, this is a modified version of
+Infinest's work. Changes made on 2026-10-17:
+
+- Rewrote the camera hook for displays that are already 4:3: keeps the 16:9
+  horizontal FOV with extra view above and below, removes gameplay
+  letterboxing, and adds optional full-screen cutscenes. The upstream 32:9
+  unlock and its second view-extents hook were removed.
+- Removed the HUD constraint (`src/uiconstraint.cpp`).
+- Builds as a `winmm.dll` proxy by default instead of `dxgi.dll`.
+- Renamed the config and log files to `Townfall43.ini` / `Townfall43.log`
+  and moved config reading into `src/config.*`.
+- Made `build.bat` use the VS 2022 Build Tools by default.
+- Added `tools/pdbtool.cpp`, `tools/build_pdbtool.bat` and `tools/pescan.py`.
+- Rewrote this README.
+
 ## License
 
-GPL-3.0, as upstream (see `LICENSE`).
+Licensed under the GNU General Public License v3.0, the same license as the
+upstream project. See [`LICENSE`](LICENSE) for the full text.
+
+Original work by Infinest. Modifications copyright (C) 2026 it-was-katsumata.
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. If you distribute a built `winmm.dll`, the GPL
+requires you to make the corresponding source available as well.
+
+SILENT HILL is a trademark of Konami Digital Entertainment. This project is
+not affiliated with or endorsed by Konami or the game's developers.

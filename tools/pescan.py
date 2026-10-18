@@ -6,6 +6,8 @@ Usage:
   pescan.py <exe> find <hex bytes...>          all .text matches of a pattern
   pescan.py <exe> qword <rva_hex> [count]      qwords at an RVA (vtable dump)
   pescan.py <exe> info                         image base / size / sections
+
+Townfall 4:3 fork, by it-was-katsumata (2026). GPL-3.0, see LICENSE.
 """
 
 import mmap

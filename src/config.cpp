@@ -1,3 +1,4 @@
+// config.cpp - Townfall 4:3 fork, by it-was-katsumata (2026). GPL-3.0, see LICENSE.
 #include "config.h"
 
 #include <cwchar>

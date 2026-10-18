@@ -1,5 +1,8 @@
 // dllmain.cpp - Townfall 4:3 mod (fork of Infinest's Townfall Super Ultrawide)
 //
+// Originally by Infinest. Modified 2026-10-17 by it-was-katsumata: new
+// config keys and defaults, HUD constraint removed. GPL-3.0, see LICENSE.
+//
 // Fixes for playing SILENT HILL: Townfall on a display that is already 4:3
 // (e.g. 2048x1536): gameplay keeps the full 16:9 horizontal view and gains
 // view above and below (the game alone crops the sides instead), gameplay is

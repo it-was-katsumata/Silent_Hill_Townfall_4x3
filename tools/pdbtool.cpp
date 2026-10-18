@@ -9,6 +9,9 @@
 //
 // Same approach as dia_layout.cpp, but msdia140.dll path is taken from the
 // DIA_DLL environment variable so it works with any VS install.
+//
+// Townfall 4:3 fork, by it-was-katsumata (2026), based on Infinest's
+// tools/dia_layout.cpp. GPL-3.0, see LICENSE.
 #include <windows.h>
 #include <dia2.h>
 #include <diacreate.h>
